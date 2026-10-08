@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 
 import requests
+from curl_cffi import requests as cffi
 from bs4 import BeautifulSoup
 
 URLS = [
@@ -75,7 +76,8 @@ def fmt_date(iso):
 
 
 def fetch(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = cffi.get(url, impersonate="chrome",
+                 headers={"Accept-Language": "en-US,en;q=0.9"}, timeout=25)
     r.raise_for_status()
     return r.text
 
