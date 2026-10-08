@@ -2,10 +2,11 @@ import asyncio
 import json
 import os
 import re
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from playwright.async_api import async_playwright
-
 
 URL = "https://www.tosc.it/en/artist/galleria-borghese/galleria-borghese-2253937/"
 
@@ -18,38 +19,47 @@ DATES = [
 STATE_FILE = Path("state.json")
 
 
-def normalize(text):
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
 def load_state():
     if not STATE_FILE.exists():
         return {}
 
     try:
-        return json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
-        )
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def save_state(state):
     STATE_FILE.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            indent=2
-        ),
+        json.dumps(state, indent=2, ensure_ascii=False),
         encoding="utf-8"
     )
 
 
-async def get_times(page, date_text):
+def send_telegram(message):
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
-    print(f"Recherche : {date_text}")
+    if not token or not chat_id:
+        print("ERREUR : secrets Telegram manquants")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": message,
+        "disable_web_page_preview": "false",
+    }).encode("utf-8")
+
+    request = urllib.request.Request(url, data=data)
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        print("Telegram :", response.status)
+
+
+async def get_availability(page):
+    print("Ouverture de TOSC...")
 
     await page.goto(
         URL,
@@ -57,236 +67,151 @@ async def get_times(page, date_text):
         timeout=60000
     )
 
-    # Laisser TOSC charger son Javascript
-    await page.wait_for_timeout(5000)
+    await page.wait_for_timeout(7000)
 
-    # Chercher la date
-    locator = page.get_by_text(
-        date_text,
-        exact=False
-    )
+    body_text = await page.locator("body").inner_text()
 
-    count = await locator.count()
+    print("Page chargée.")
+    print("Recherche des dates...")
 
-    print(f"  éléments trouvés : {count}")
+    results = {}
 
-    clicked = False
+    for date in DATES:
+        # Recherche de la date dans le texte de la page
+        date_pattern = re.escape(date)
 
-    for i in range(count):
-
-        item = locator.nth(i)
-
-        try:
-            if await item.is_visible():
-                await item.scroll_into_view_if_needed()
-                await item.click()
-                clicked = True
-                break
-        except Exception:
-            pass
-
-    if not clicked:
-
-        print(
-            f"  IMPOSSIBLE DE CLIQUER SUR {date_text}"
+        # On récupère le texte autour de la date
+        match = re.search(
+            rf"{date_pattern}.*?(?=\n##|\Z)",
+            body_text,
+            re.DOTALL
         )
 
-        await page.screenshot(
-            path=f"debug-{date_text[:2]}.png",
-            full_page=True
-        )
+        if match:
+            block = match.group(0)
 
-        return []
+            # Recherche du statut TOSC
+            if re.search(r"\bAvailable\b", block, re.IGNORECASE):
+                status = "Available"
+            elif re.search(r"\bLimited\b", block, re.IGNORECASE):
+                status = "Limited"
+            elif re.search(r"\bFew\b", block, re.IGNORECASE):
+                status = "Few"
+            else:
+                status = "Unknown"
 
-    # Attendre l'ouverture de la sélection
-    await page.wait_for_timeout(3000)
-
-    # Chercher tous les textes ressemblant à une heure
-    elements = await page.locator(
-        "button, a, label, [role='button']"
-    ).all()
-
-    times = set()
-
-    for element in elements:
-
-        try:
-
-            if not await element.is_visible():
-                continue
-
-            text = normalize(
-                await element.inner_text()
-            )
-
-            matches = re.findall(
-                r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b",
-                text
-            )
-
-            for match in matches:
-
-                times.add(
-                    match.replace(".", ":")
+            # Recherche éventuelle d'horaires
+            times = sorted(set(
+                re.findall(
+                    r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b",
+                    block
                 )
+            ))
 
-        except Exception:
-            continue
+            results[date] = {
+                "status": status,
+                "times": times,
+            }
 
-    result = sorted(times)
+            print(
+                f"{date} : {status}"
+                + (f" | horaires : {', '.join(times)}" if times else "")
+            )
 
-    print(
-        f"  horaires : "
-        f"{', '.join(result) if result else 'AUCUN'}"
-    )
+        else:
+            print(f"{date} : date non trouvée")
+            results[date] = {
+                "status": "Not found",
+                "times": [],
+            }
 
-    return result
+    return results
 
 
 async def main():
-
     old_state = load_state()
 
-    new_state = {}
-
     async with async_playwright() as p:
-
-        browser = await p.chromium.launch(
-            headless=True
-        )
+        browser = await p.chromium.launch(headless=True)
 
         page = await browser.new_page(
             viewport={
                 "width": 1440,
-                "height": 1000
+                "height": 1200,
             }
         )
 
-        for date in DATES:
-
-            try:
-
-                times = await get_times(
-                    page,
-                    date
-                )
-
-                new_state[date] = times
-
-            except Exception as error:
-
-                print(
-                    f"Erreur avec {date}: {error}"
-                )
-
-                new_state[date] = []
+        new_state = await get_availability(page)
 
         await browser.close()
 
-    # -----------------------------------------
-    # Comparaison avec la vérification précédente
-    # -----------------------------------------
+    print("\n--- Etat actuel ---")
+    print(json.dumps(new_state, indent=2, ensure_ascii=False))
 
     changes = []
 
     for date in DATES:
-
-        old = set(
-            old_state.get(date, [])
+        old = old_state.get(
+            date,
+            {
+                "status": "Unknown",
+                "times": [],
+            }
         )
 
-        new = set(
-            new_state.get(date, [])
+        new = new_state.get(
+            date,
+            {
+                "status": "Unknown",
+                "times": [],
+            }
         )
 
-        added = sorted(new - old)
-        removed = sorted(old - new)
+        if old != new:
+            changes.append((date, old, new))
 
-        if added or removed:
+    # Première exécution : on mémorise simplement l'état
+    if not old_state:
+        print("\nPremière exécution : création de l'état de référence.")
+        save_state(new_state)
+        return
 
-            changes.append({
-                "date": date,
-                "added": added,
-                "removed": removed,
-                "current": sorted(new)
-            })
-
-    # -----------------------------------------
-    # Message Telegram
-    # -----------------------------------------
-
+    # Changements détectés
     if changes:
-
-        message = [
-            "🚨 GALLERIA BORGHESE",
-            "CHANGEMENT DE DISPONIBILITÉ",
-            ""
+        message_lines = [
+            "🚨 GALLERIA BORGHESE — CHANGEMENT !",
+            "",
         ]
 
-        for change in changes:
-
-            message.append(
-                f"📅 {change['date']}"
+        for date, old, new in changes:
+            message_lines.append(f"📅 {date}")
+            message_lines.append(
+                f"Avant : {old.get('status', 'Unknown')}"
+            )
+            message_lines.append(
+                f"Maintenant : {new.get('status', 'Unknown')}"
             )
 
-            if change["added"]:
-                message.append(
-                    "🟢 Nouveaux : "
-                    + ", ".join(change["added"])
+            if new.get("times"):
+                message_lines.append(
+                    "🕐 Horaires : " + ", ".join(new["times"])
                 )
 
-            if change["removed"]:
-                message.append(
-                    "🔴 Disparus : "
-                    + ", ".join(change["removed"])
-                )
+            message_lines.append("")
 
-            message.append(
-                "🕐 Maintenant : "
-                + (
-                    ", ".join(change["current"])
-                    if change["current"]
-                    else "aucun créneau détecté"
-                )
-            )
+        message_lines.append("🎟️ Vérifie rapidement les billets :")
+        message_lines.append(URL)
 
-            message.append("")
+        message = "\n".join(message_lines)
 
-        message.append(
-            "🎟️ Réserver :"
-        )
-        message.append(URL)
+        print("\nCHANGEMENT DETECTE !")
+        print(message)
 
-        telegram_message = "\n".join(message)
-
-        print()
-        print(telegram_message)
-
-        token = os.environ.get("TELEGRAM_TOKEN")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-        if token and chat_id:
-
-            import urllib.request
-            import urllib.parse
-
-            data = urllib.parse.urlencode({
-                "chat_id": chat_id,
-                "text": telegram_message,
-            }).encode()
-
-            request = urllib.request.Request(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data=data
-            )
-
-            urllib.request.urlopen(request)
+        send_telegram(message)
 
     else:
+        print("\nAucun changement.")
 
-        print("Aucun changement.")
-
-    # Sauvegarder le nouvel état
     save_state(new_state)
 
 
