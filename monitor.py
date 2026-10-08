@@ -8,14 +8,13 @@ from pathlib import Path
 import requests
 
 
-DATES = {
-    "29 Oct 2026": "https://www.ticketone.it/event/galleria-borghese-galleria-borghese-22159580/",
-    "30 Oct 2026": "https://www.ticketone.it/event/galleria-borghese-galleria-borghese-22159581/",
-}
+URL = "https://www.ticketone.it/en/artist/galleria-borghese/galleria-borghese-2253937/"
 
-# IMPORTANT :
-# Le lien du 31 octobre sera ajouté après vérification de son identifiant
-# TicketOne. On ne va pas inventer une URL.
+DATES = [
+    "29 Oct 2026",
+    "30 Oct 2026",
+    "31 Oct 2026",
+]
 
 STATE_FILE = Path("state.json")
 
@@ -58,10 +57,7 @@ def send_telegram(message):
         "disable_web_page_preview": "false",
     }).encode("utf-8")
 
-    request = urllib.request.Request(
-        url,
-        data=data
-    )
+    request = urllib.request.Request(url, data=data)
 
     with urllib.request.urlopen(
         request,
@@ -70,7 +66,7 @@ def send_telegram(message):
         print("Telegram :", response.status)
 
 
-def get_page(url):
+def get_ticketone_page():
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -80,10 +76,10 @@ def get_page(url):
         "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
     }
 
-    print(f"Lecture : {url}")
+    print("Ouverture de TicketOne...")
 
     response = requests.get(
-        url,
+        URL,
         headers=headers,
         timeout=30
     )
@@ -97,19 +93,7 @@ def get_page(url):
     return response.text
 
 
-def extract_availability(html):
-    """
-    TicketOne affiche les créneaux sous la forme :
-
-    IN 09:00-OUT 11:00
-    Intero
-    €18,00
-    Non disponibile
-
-    On récupère donc chaque créneau et son statut.
-    """
-
-    # Transformer le HTML en texte simple
+def clean_html(html):
     text = re.sub(
         r"<script\b[^>]*>.*?</script>",
         " ",
@@ -130,13 +114,6 @@ def extract_availability(html):
         text
     )
 
-    # Nettoyage des espaces
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
     text = (
         text
         .replace("&nbsp;", " ")
@@ -144,73 +121,36 @@ def extract_availability(html):
         .replace("&amp;", "&")
     )
 
-    results = []
+    return re.sub(r"\s+", " ", text)
 
-    # Créneaux classiques : IN 09:00-OUT 11:00
-    slots = re.findall(
-        r"IN\s+([0-2]\d:[0-5]\d)-OUT\s+([0-2]\d:[0-5]\d)(.*?)(?=IN\s+[0-2]\d:[0-5]\d|$)",
+
+def find_status(text, date):
+    """
+    Cherche le statut associé à une date TicketOne.
+
+    Exemple de contenu TicketOne :
+
+    30 Oct 2026
+    Few
+    Galleria Borghese
+    """
+
+    pattern = (
+        rf"{re.escape(date)}"
+        rf".{{0,500}}?"
+        rf"\b(Available|Limited|Few)\b"
+    )
+
+    match = re.search(
+        pattern,
         text,
         flags=re.IGNORECASE
     )
 
-    for start, end, block in slots:
-        if re.search(
-            r"Non disponibile|Not available",
-            block,
-            re.IGNORECASE
-        ):
-            status = "Not available"
-        elif re.search(
-            r"Disponibile|Available",
-            block,
-            re.IGNORECASE
-        ):
-            status = "Available"
-        else:
-            status = "Unknown"
+    if match:
+        return match.group(1).title()
 
-        results.append({
-            "time": f"{start}-{end}",
-            "status": status
-        })
-
-    # Visites guidées : 09:10, 11:10, etc.
-    guided = re.findall(
-        r"([0-2]\d:[0-5]\d)\s+([^€]{0,80}?(?:GUIDED TOUR|Visita guidata).*?)(?=[0-2]\d:[0-5]\d|$)",
-        text,
-        flags=re.IGNORECASE
-    )
-
-    for time, block in guided:
-        if re.search(
-            r"Non disponibile|Not available",
-            block,
-            re.IGNORECASE
-        ):
-            status = "Not available"
-        elif re.search(
-            r"Disponibile|Available",
-            block,
-            re.IGNORECASE
-        ):
-            status = "Available"
-        else:
-            status = "Unknown"
-
-        results.append({
-            "time": time,
-            "status": status
-        })
-
-    # Supprimer les doublons
-    unique = {}
-
-    for item in results:
-        unique[
-            f"{item['time']}|{item['status']}"
-        ] = item
-
-    return list(unique.values())
+    return "Unknown"
 
 
 def main():
@@ -221,82 +161,46 @@ def main():
 
     old_state = load_state()
 
+    try:
+        html = get_ticketone_page()
+    except Exception as error:
+        print(f"ERREUR TicketOne : {error}")
+        raise
+
+    text = clean_html(html)
+
     new_state = {}
-
-    for date, url in DATES.items():
-
-        print()
-        print(f"📅 {date}")
-
-        try:
-            html = get_page(url)
-
-            availability = extract_availability(html)
-
-            new_state[date] = {
-                "url": url,
-                "slots": availability
-            }
-
-            available = [
-                x["time"]
-                for x in availability
-                if x["status"] == "Available"
-            ]
-
-            if available:
-                print(
-                    "🚨 DISPONIBILITÉS : "
-                    + ", ".join(available)
-                )
-            else:
-                print("Aucune disponibilité détectée.")
-
-        except Exception as error:
-
-            print(
-                f"ERREUR pour {date} : {error}"
-            )
-
-            # On conserve l'ancien état en cas d'erreur
-            new_state[date] = old_state.get(
-                date,
-                {
-                    "url": url,
-                    "slots": []
-                }
-            )
-
-    print()
-    print("Comparaison avec le passage précédent...")
-
-    changes = []
 
     for date in DATES:
 
-        old = old_state.get(
-            date,
-            {
-                "url": DATES[date],
-                "slots": []
-            }
+        status = find_status(
+            text,
+            date
         )
 
-        new = new_state[date]
+        new_state[date] = {
+            "status": status
+        }
 
-        if old.get("slots") != new.get("slots"):
-            changes.append(
-                (
-                    date,
-                    old.get("slots", []),
-                    new.get("slots", [])
-                )
-            )
+        print(
+            f"{date} : {status}"
+        )
 
-    # Première exécution :
-    # on mémorise seulement l'état.
+    print()
+    print("--- Etat actuel ---")
+
+    print(
+        json.dumps(
+            new_state,
+            indent=2,
+            ensure_ascii=False
+        )
+    )
+
+    # Première exécution
     if not old_state:
 
+        print()
         print(
             "Première exécution : "
             "création de l'état de référence."
@@ -305,14 +209,40 @@ def main():
         save_state(new_state)
         return
 
+    changes = []
+
+    for date in DATES:
+
+        old_status = old_state.get(
+            date,
+            {}
+        ).get(
+            "status",
+            "Unknown"
+        )
+
+        new_status = new_state[date]["status"]
+
+        if old_status != new_status:
+
+            changes.append(
+                (
+                    date,
+                    old_status,
+                    new_status
+                )
+            )
+
     if not changes:
 
+        print()
         print("Aucun changement.")
 
     else:
 
+        print()
         print(
-            f"{len(changes)} changement(s) détecté(s)."
+            f"{len(changes)} changement(s) détecté(s) !"
         )
 
         message = [
@@ -322,45 +252,27 @@ def main():
             ""
         ]
 
-        for date, old_slots, new_slots in changes:
+        for date, old_status, new_status in changes:
 
             message.append(
                 f"📅 {date}"
             )
 
-            old_available = [
-                x["time"]
-                for x in old_slots
-                if x["status"] == "Available"
-            ]
+            message.append(
+                f"Avant : {old_status}"
+            )
 
-            new_available = [
-                x["time"]
-                for x in new_slots
-                if x["status"] == "Available"
-            ]
-
-            if new_available:
-                message.append(
-                    "🎟️ Disponible : "
-                    + ", ".join(new_available)
-                )
-            else:
-                message.append(
-                    "❌ Aucune disponibilité détectée"
-                )
-
-            if old_available:
-                message.append(
-                    "Avant : "
-                    + ", ".join(old_available)
-                )
+            message.append(
+                f"Maintenant : {new_status}"
+            )
 
             message.append("")
 
         message.append(
-            "👉 Vérifie rapidement la billetterie."
+            "🎟️ Billetterie :"
         )
+
+        message.append(URL)
 
         send_telegram(
             "\n".join(message)
