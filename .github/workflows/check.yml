@@ -30,8 +30,8 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHECK_EVERY: "120"
-          DURATION: "250"
+          CHECK_EVERY: ${{ github.event_name == 'schedule' && '120' || '0' }}
+          DURATION: ${{ github.event_name == 'schedule' && '250' || '0' }}
 
       - name: Sauvegarder l'état
         run: |
