@@ -22,9 +22,16 @@ def load_state():
         return {}
 
     try:
-        return json.loads(
+        data = json.loads(
             STATE_FILE.read_text(encoding="utf-8")
         )
+
+        # Ancienne structure éventuelle
+        if not isinstance(data, dict):
+            return {}
+
+        return data
+
     except Exception:
         return {}
 
@@ -65,82 +72,57 @@ def send_telegram(message):
 
 
 def get_page(url):
+    """
+    Passe par Jina Reader afin d'éviter le blocage
+    de TicketOne/TOSC depuis GitHub Actions.
+    """
+
+    jina_url = "https://r.jina.ai/" + url
+
+    print("Source :", jina_url)
+
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/140.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/plain",
     }
 
     response = requests.get(
-        url,
+        jina_url,
         headers=headers,
-        timeout=20
+        timeout=30
     )
 
     response.raise_for_status()
 
+    print(
+        f"Réponse reçue : {len(response.text)} caractères"
+    )
+
     return response.text
 
 
-def clean_html(html):
-    text = re.sub(
-        r"<script\b[^>]*>.*?</script>",
-        " ",
-        html,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-
-    text = re.sub(
-        r"<style\b[^>]*>.*?</style>",
-        " ",
-        text,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-
-    text = re.sub(
-        r"<[^>]+>",
-        " ",
-        text
-    )
-
-    text = (
-        text
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&#39;", "'")
-    )
-
-    return re.sub(r"\s+", " ", text)
-
-
 def find_status(text):
-    """
-    On considère la journée disponible si la page contient
-    au moins un créneau qui n'est pas marqué 'Not available'.
-    """
+    text_lower = text.lower()
 
-    available_markers = [
-        "Available",
-        "Few",
-        "Limited",
-    ]
-
-    for marker in available_markers:
-        if re.search(
-            rf"\b{marker}\b",
-            text,
-            re.IGNORECASE
-        ):
-            return marker.title()
-
+    # Si on trouve explicitement des billets disponibles.
     if re.search(
-        r"\bNot available\b",
-        text,
-        re.IGNORECASE
+        r"\bavailable\b|\bin stock\b",
+        text_lower
     ):
+        return "Available"
+
+    # TicketOne utilise aussi des quantités numériques.
+    # Un prix suivi d'un 0 signifie généralement aucun billet.
+    if re.search(
+        r"€\s*\d+(?:[.,]\d+)?\s+\d+\s",
+        text
+    ):
+        return "Available"
+
+    if "not available" in text_lower:
+        return "Not available"
+
+    if "currently not available" in text_lower:
         return "Not available"
 
     return "Unknown"
@@ -153,16 +135,17 @@ def main():
     print("==============================")
 
     old_state = load_state()
+
     new_state = {}
 
     for date, url in EVENTS.items():
 
         print()
-        print(f"Ouverture {date}...")
+        print(f"Vérification {date}...")
 
         try:
-            html = get_page(url)
-            text = clean_html(html)
+
+            text = get_page(url)
 
             status = find_status(text)
 
@@ -197,10 +180,11 @@ def main():
         )
     )
 
+    # Première exécution = création de la référence.
     if not old_state:
 
         print()
-        print("Première exécution : état de référence.")
+        print("Création de l'état de référence.")
 
         save_state(new_state)
         return
@@ -209,18 +193,19 @@ def main():
 
     for date in EVENTS:
 
-        old_status = old_state.get(
-            date,
-            {}
-        ).get(
-            "status",
-            "Unknown"
-        )
+        old_entry = old_state.get(date, {})
+
+        if not isinstance(old_entry, dict):
+            old_status = "Unknown"
+        else:
+            old_status = old_entry.get(
+                "status",
+                "Unknown"
+            )
 
         new_status = new_state[date]["status"]
 
-        # On ne considère pas une erreur réseau
-        # comme un changement de disponibilité.
+        # Une erreur réseau ne déclenche jamais d'alerte.
         if new_status == "ERROR":
             continue
 
@@ -262,15 +247,11 @@ def main():
                 f"Maintenant : {new_status}"
             )
 
+            message.append(
+                EVENTS[date]
+            )
+
             message.append("")
-
-        message.append(
-            "🎟️ Réserver :"
-        )
-
-        message.append(
-            EVENTS[changes[0][0]]
-        )
 
         send_telegram(
             "\n".join(message)
