@@ -73,24 +73,55 @@ def get_ticketone_page():
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/140.0.0.0 Safari/537.36"
         ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;"
+            "q=0.9,image/avif,image/webp,*/*;q=0.8"
+        ),
         "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+        "Connection": "close",
     }
 
     print("Ouverture de TicketOne...")
 
-    response = requests.get(
-        URL,
-        headers=headers,
-        timeout=30
+    last_error = None
+
+    for attempt in range(1, 4):
+
+        try:
+            print(
+                f"Tentative {attempt}/3..."
+            )
+
+            response = requests.get(
+                URL,
+                headers=headers,
+                timeout=(15, 90),
+            )
+
+            response.raise_for_status()
+
+            print(
+                f"Page reçue : {len(response.text)} caractères"
+            )
+
+            return response.text
+
+        except requests.RequestException as error:
+
+            last_error = error
+
+            print(
+                f"Échec tentative {attempt}/3 : {error}"
+            )
+
+            if attempt < 3:
+                import time
+                time.sleep(5)
+
+    raise RuntimeError(
+        f"Impossible de récupérer TicketOne après 3 tentatives : "
+        f"{last_error}"
     )
-
-    response.raise_for_status()
-
-    print(
-        f"Page reçue : {len(response.text)} caractères"
-    )
-
-    return response.text
 
 
 def clean_html(html):
