@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import re
@@ -6,16 +5,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+import requests
 
 
-URL = "https://www.tosc.it/en/artist/galleria-borghese/galleria-borghese-2253937/"
+DATES = {
+    "29 Oct 2026": "https://www.ticketone.it/event/galleria-borghese-galleria-borghese-22159580/",
+    "30 Oct 2026": "https://www.ticketone.it/event/galleria-borghese-galleria-borghese-22159581/",
+}
 
-DATES = [
-    "29 Oct 2026",
-    "30 Oct 2026",
-    "31 Oct 2026",
-]
+# IMPORTANT :
+# Le lien du 31 octobre sera ajouté après vérification de son identifiant
+# TicketOne. On ne va pas inventer une URL.
 
 STATE_FILE = Path("state.json")
 
@@ -48,8 +48,7 @@ def send_telegram(message):
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-        print("ERREUR : secrets Telegram manquants")
-        return
+        raise RuntimeError("Secrets Telegram manquants.")
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
 
@@ -71,194 +70,205 @@ def send_telegram(message):
         print("Telegram :", response.status)
 
 
-def analyse_page_text(text):
-    results = {}
+def get_page(url):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/140.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+    }
 
-    # Nettoyage basique
-    text = text.replace("\r", "")
+    print(f"Lecture : {url}")
 
-    for date in DATES:
-        pattern = re.escape(date)
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=30
+    )
 
-        match = re.search(
-            rf"{pattern}.*?(?=\n\s*\n|\Z)",
-            text,
-            re.IGNORECASE | re.DOTALL
-        )
+    response.raise_for_status()
 
-        if not match:
-            # Deuxième tentative plus large
-            match = re.search(
-                rf"{pattern}.*",
-                text,
-                re.IGNORECASE | re.DOTALL
-            )
+    print(
+        f"Page reçue : {len(response.text)} caractères"
+    )
 
-        if not match:
-            results[date] = {
-                "status": "Not found",
-                "times": []
-            }
-            continue
+    return response.text
 
-        block = match.group(0)
 
-        if re.search(r"\bAvailable\b", block, re.IGNORECASE):
+def extract_availability(html):
+    """
+    TicketOne affiche les créneaux sous la forme :
+
+    IN 09:00-OUT 11:00
+    Intero
+    €18,00
+    Non disponibile
+
+    On récupère donc chaque créneau et son statut.
+    """
+
+    # Transformer le HTML en texte simple
+    text = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        " ",
+        html,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    text = re.sub(
+        r"<style\b[^>]*>.*?</style>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text
+    )
+
+    # Nettoyage des espaces
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    text = (
+        text
+        .replace("&nbsp;", " ")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+    )
+
+    results = []
+
+    # Créneaux classiques : IN 09:00-OUT 11:00
+    slots = re.findall(
+        r"IN\s+([0-2]\d:[0-5]\d)-OUT\s+([0-2]\d:[0-5]\d)(.*?)(?=IN\s+[0-2]\d:[0-5]\d|$)",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    for start, end, block in slots:
+        if re.search(
+            r"Non disponibile|Not available",
+            block,
+            re.IGNORECASE
+        ):
+            status = "Not available"
+        elif re.search(
+            r"Disponibile|Available",
+            block,
+            re.IGNORECASE
+        ):
             status = "Available"
-        elif re.search(r"\bLimited\b", block, re.IGNORECASE):
-            status = "Limited"
-        elif re.search(r"\bFew\b", block, re.IGNORECASE):
-            status = "Few"
-        elif re.search(r"\bSold\s*out\b", block, re.IGNORECASE):
-            status = "Sold out"
         else:
             status = "Unknown"
 
-        times = sorted(set(
-            re.findall(
-                r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b",
-                block
-            )
-        ))
+        results.append({
+            "time": f"{start}-{end}",
+            "status": status
+        })
 
-        results[date] = {
-            "status": status,
-            "times": times
-        }
+    # Visites guidées : 09:10, 11:10, etc.
+    guided = re.findall(
+        r"([0-2]\d:[0-5]\d)\s+([^€]{0,80}?(?:GUIDED TOUR|Visita guidata).*?)(?=[0-2]\d:[0-5]\d|$)",
+        text,
+        flags=re.IGNORECASE
+    )
 
-    return results
-
-
-async def get_page_with_playwright(page):
-    print("Tentative Playwright...")
-
-    last_error = None
-
-    for attempt in range(1, 4):
-        try:
-            print(f"Tentative {attempt}/3...")
-
-            await page.goto(
-                URL,
-                wait_until="commit",
-                timeout=60000
-            )
-
-            await page.wait_for_timeout(8000)
-
-            text = await page.locator("body").inner_text()
-
-            if text.strip():
-                print("Page récupérée avec Playwright.")
-                return text
-
-        except Exception as error:
-            last_error = error
-            print(
-                f"Échec tentative {attempt} : {error}"
-            )
-
-            await asyncio.sleep(3)
-
-    print("Playwright n'a pas réussi.")
-    print(f"Dernière erreur : {last_error}")
-
-    return None
-
-
-async def get_availability():
-    async with async_playwright() as p:
-
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-http2",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
-
-        context = await browser.new_context(
-            viewport={
-                "width": 1440,
-                "height": 1200
-            },
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/140.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9"
-            }
-        )
-
-        page = await context.new_page()
-
-        text = await get_page_with_playwright(page)
-
-        await browser.close()
-
-    if text is None:
-        raise RuntimeError(
-            "Impossible de récupérer la page TOSC."
-        )
-
-    print("\nAnalyse de la page...\n")
-
-    results = analyse_page_text(text)
-
-    for date in DATES:
-        result = results[date]
-
-        times = result["times"]
-
-        if times:
-            times_text = ", ".join(times)
-            print(
-                f"{date} : "
-                f"{result['status']} | "
-                f"horaires : {times_text}"
-            )
+    for time, block in guided:
+        if re.search(
+            r"Non disponibile|Not available",
+            block,
+            re.IGNORECASE
+        ):
+            status = "Not available"
+        elif re.search(
+            r"Disponibile|Available",
+            block,
+            re.IGNORECASE
+        ):
+            status = "Available"
         else:
-            print(
-                f"{date} : "
-                f"{result['status']}"
-            )
+            status = "Unknown"
 
-    return results
+        results.append({
+            "time": time,
+            "status": status
+        })
+
+    # Supprimer les doublons
+    unique = {}
+
+    for item in results:
+        unique[
+            f"{item['time']}|{item['status']}"
+        ] = item
+
+    return list(unique.values())
 
 
-async def main():
+def main():
 
-    print("===================================")
-    print("SURVEILLANCE GALLERIA BORGHESE")
-    print("===================================\n")
+    print("==============================")
+    print("GALLERIA BORGHESE MONITOR")
+    print("==============================")
 
     old_state = load_state()
 
-    new_state = await get_availability()
+    new_state = {}
 
-    print("\n--- Nouvel état ---")
+    for date, url in DATES.items():
 
-    print(
-        json.dumps(
-            new_state,
-            indent=2,
-            ensure_ascii=False
-        )
-    )
+        print()
+        print(f"📅 {date}")
 
-    # Première exécution
-    if not old_state:
+        try:
+            html = get_page(url)
 
-        print(
-            "\nPremière exécution : "
-            "création de l'état de référence."
-        )
+            availability = extract_availability(html)
 
-        save_state(new_state)
-        return
+            new_state[date] = {
+                "url": url,
+                "slots": availability
+            }
+
+            available = [
+                x["time"]
+                for x in availability
+                if x["status"] == "Available"
+            ]
+
+            if available:
+                print(
+                    "🚨 DISPONIBILITÉS : "
+                    + ", ".join(available)
+                )
+            else:
+                print("Aucune disponibilité détectée.")
+
+        except Exception as error:
+
+            print(
+                f"ERREUR pour {date} : {error}"
+            )
+
+            # On conserve l'ancien état en cas d'erreur
+            new_state[date] = old_state.get(
+                date,
+                {
+                    "url": url,
+                    "slots": []
+                }
+            )
+
+    print()
+    print("Comparaison avec le passage précédent...")
 
     changes = []
 
@@ -267,81 +277,97 @@ async def main():
         old = old_state.get(
             date,
             {
-                "status": "Unknown",
-                "times": []
+                "url": DATES[date],
+                "slots": []
             }
         )
 
-        new = new_state.get(
-            date,
-            {
-                "status": "Unknown",
-                "times": []
-            }
-        )
+        new = new_state[date]
 
-        if old != new:
+        if old.get("slots") != new.get("slots"):
             changes.append(
                 (
                     date,
-                    old,
-                    new
+                    old.get("slots", []),
+                    new.get("slots", [])
                 )
             )
 
-    if changes:
+    # Première exécution :
+    # on mémorise seulement l'état.
+    if not old_state:
 
-        print("\n🚨 CHANGEMENT DÉTECTÉ !")
-
-        message_lines = [
-            "🚨 GALLERIA BORGHESE",
-            "",
-            "Nouveau changement de disponibilité :",
-            ""
-        ]
-
-        for date, old, new in changes:
-
-            message_lines.append(
-                f"📅 {date}"
-            )
-
-            message_lines.append(
-                f"Avant : {old.get('status', 'Unknown')}"
-            )
-
-            message_lines.append(
-                f"Maintenant : {new.get('status', 'Unknown')}"
-            )
-
-            if new.get("times"):
-                message_lines.append(
-                    "🕐 Horaires : "
-                    + ", ".join(new["times"])
-                )
-
-            message_lines.append("")
-
-        message_lines.append(
-            "🎟️ Billetterie :"
+        print(
+            "Première exécution : "
+            "création de l'état de référence."
         )
 
-        message_lines.append(URL)
+        save_state(new_state)
+        return
 
-        message = "\n".join(message_lines)
+    if not changes:
 
-        print(message)
-
-        send_telegram(message)
+        print("Aucun changement.")
 
     else:
 
         print(
-            "\nAucun changement détecté."
+            f"{len(changes)} changement(s) détecté(s)."
+        )
+
+        message = [
+            "🚨 GALLERIA BORGHESE",
+            "",
+            "CHANGEMENT DE DISPONIBILITÉ !",
+            ""
+        ]
+
+        for date, old_slots, new_slots in changes:
+
+            message.append(
+                f"📅 {date}"
+            )
+
+            old_available = [
+                x["time"]
+                for x in old_slots
+                if x["status"] == "Available"
+            ]
+
+            new_available = [
+                x["time"]
+                for x in new_slots
+                if x["status"] == "Available"
+            ]
+
+            if new_available:
+                message.append(
+                    "🎟️ Disponible : "
+                    + ", ".join(new_available)
+                )
+            else:
+                message.append(
+                    "❌ Aucune disponibilité détectée"
+                )
+
+            if old_available:
+                message.append(
+                    "Avant : "
+                    + ", ".join(old_available)
+                )
+
+            message.append("")
+
+        message.append(
+            "👉 Vérifie rapidement la billetterie."
+        )
+
+        send_telegram(
+            "\n".join(message)
         )
 
     save_state(new_state)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
