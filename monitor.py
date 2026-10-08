@@ -104,7 +104,9 @@ def parse(html):
 
     m = re.search(r"(\d{2})/(\d{2})/(\d{4})", " ".join(lines))
     if not m:
-        raise ValueError("date introuvable sur la page")
+        titre = soup.title.string.strip() if soup.title and soup.title.string else "?"
+        debut = " ".join(lines)[:500]
+        raise ValueError(f"date introuvable | titre={titre} | début={debut}")
     date_iso = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
 
     try:
