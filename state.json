@@ -12,12 +12,16 @@
   "url": "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159571/"
  },
  "fails": {
-  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159571/": 10,
-  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159580/": 10,
-  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159581/": 4
+  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159571/": 13,
+  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159580/": 2,
+  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159581/": 7
  },
  "initialized": true,
  "pages": {
+  "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159580/": {
+   "date": "2026-10-29",
+   "slots": {}
+  },
   "https://www.tosc.it/en/event/galleria-borghese-galleria-borghese-22159581/": {
    "date": "2026-10-30",
    "slots": {}
