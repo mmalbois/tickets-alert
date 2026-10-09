@@ -9,7 +9,6 @@ from datetime import date
 from pathlib import Path
 
 import requests
-from curl_cffi import requests as cffi
 from bs4 import BeautifulSoup
 
 URLS = [
@@ -76,10 +75,15 @@ def fmt_date(iso):
 
 
 def fetch(url):
-    r = cffi.get(url, impersonate="chrome",
-                 headers={"Accept-Language": "en-US,en;q=0.9"}, timeout=25)
-    r.raise_for_status()
-    return r.text
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(locale="en-US")
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_selector("text=PRICE AND FEES TABLE", timeout=30000)
+        html = page.content()
+        browser.close()
+        return html
 
 
 def parse(html):
